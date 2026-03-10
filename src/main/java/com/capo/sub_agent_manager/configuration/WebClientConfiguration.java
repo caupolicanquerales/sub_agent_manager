@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.http.client.ReactorClientHttpRequestFactory;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.util.Objects;
@@ -51,8 +52,13 @@ public class WebClientConfiguration {
 	
 	@Bean
     public WebClient.Builder webClientBuilder(HttpClient httpClient) {
+        ExchangeStrategies strategies = ExchangeStrategies.builder()
+                .codecs(configurer -> configurer.defaultCodecs()
+                        .maxInMemorySize(10 * 1024 * 1024)) // 10 MB — large enough for image SSE payloads
+                .build();
         return WebClient.builder()
-                .clientConnector(new ReactorClientHttpConnector(Objects.requireNonNull(httpClient)));
+                .clientConnector(new ReactorClientHttpConnector(Objects.requireNonNull(httpClient)))
+                .exchangeStrategies(strategies);
     }
 
     /**

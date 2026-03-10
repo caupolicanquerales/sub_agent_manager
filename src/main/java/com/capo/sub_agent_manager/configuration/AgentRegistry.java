@@ -14,10 +14,31 @@ public class AgentRegistry {
 	@Value(value="${url-improver}")
 	private String urlImprover;
 	
+	@Value(value="${url-image}")
+	private String urlImage;
+
+	@Value(value="${agent-type-html:WEBFLUX}")
+	private AgentType agentTypeHtml;
+
+	@Value(value="${agent-type-improver:WEBFLUX}")
+	private AgentType agentTypeImprover;
+
+	@Value(value="${agent-type-image:SPRING_MVC}")
+	private AgentType agentTypeImage;
+
 	public Map<String, String> getAgents() {
         return Map.of(
             "html", urlHtml,
-            "improver", urlImprover
+            "improver", urlImprover,
+            "image", urlImage
+        );
+    }
+
+	public Map<String, AgentType> getAgentTypes() {
+        return Map.of(
+            "html", agentTypeHtml,
+            "improver", agentTypeImprover,
+            "image", agentTypeImage
         );
     }
 	
