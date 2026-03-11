@@ -1,13 +1,14 @@
 package com.capo.sub_agent_manager.service;
 
+import java.time.Duration;
 import java.util.Map;
 import java.util.Objects;
-import java.util.UUID;
 import java.util.regex.Pattern;
 
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
@@ -34,22 +35,32 @@ public class ExecutingDynamicOrchestratorService {
 	private final WebClient webClient;
 	private final AgentRegistry registry;
 	private final ObjectMapper mapper;
+	private final ReactiveStringRedisTemplate redisTemplate;
+	
+	private static final String CONTEXT_KEY_PREFIX = "orchestrator:context:";
+    private static final Duration CONTEXT_TTL = Duration.ofHours(1);
 	
 	public ExecutingDynamicOrchestratorService(@Qualifier("chatClientOrchestrator") ChatClient chatClient,
 			WebClient webClient, AgentRegistry registry,
-			ObjectMapper mapper) {
+			ObjectMapper mapper,
+			ReactiveStringRedisTemplate redisTemplate) {
 		this.chatClient= chatClient;
 		this.webClient= webClient;
 		this.registry= registry;
 		this.mapper= mapper;
+		this.redisTemplate=redisTemplate;
 	}
 	
 	public Flux<ServerSentEvent<DataMessage>> handleDynamicOrchestrator(GenerationSyntheticDataRequest request) {
         Sinks.Many<ServerSentEvent<DataMessage>> userPipe = Sinks.many().unicast().onBackpressureBuffer();
-        // Each orchestration run gets its own conversation ID so that the
-        // ChatMemory advisor does not bleed history across runs or users.
-        String conversationId = UUID.randomUUID().toString();
-        processStep(request.getPrompt(), "", userPipe, 0, conversationId);
+        String key = CONTEXT_KEY_PREFIX + request.getConversationId();
+        redisTemplate.opsForValue().get(key)
+            .defaultIfEmpty("")
+            .subscribe(previousContext ->
+                processStep(request.getPrompt(), previousContext,
+                            userPipe, 0, request.getConversationId())
+            );
+        
         return userPipe.asFlux();
     }
 	
@@ -86,7 +97,7 @@ public class ExecutingDynamicOrchestratorService {
         			return;
         		}
 
-        		if ("FINAL".equals(res.action())) {
+        		if ("FINAL".equalsIgnoreCase(res.action())) {
         			pipe.tryEmitComplete();
         		} else {
         			executeAgent(originalGoal, accumulatedContext, pipe, depth, res, conversationId);
@@ -118,19 +129,18 @@ public class ExecutingDynamicOrchestratorService {
 			})
 			.doOnError(pipe::tryEmitError)
 			.doOnComplete(() -> {
-				String stepSummary = buildStepSummary(res, stepBuffer.toString());
-				processStep(originalGoal, buildNextContext(accumulatedContext, stepSummary), pipe, depth + 1, conversationId);
+				String stepSummary = buildStepSummary(res, stepBuffer.toString(), depth);
+				String nextContext = buildNextContext(accumulatedContext, stepSummary);
+				String key = CONTEXT_KEY_PREFIX + conversationId;
+				redisTemplate.opsForValue()
+			        .set(key, nextContext, CONTEXT_TTL)
+			        .subscribe();
+				processStep(originalGoal, nextContext, pipe, depth + 1, conversationId);
 			})
 			.subscribe();
 	}
 	
-	/**
-	 * Routes the call to the correct method based on the agent's type registered
-	 * in AgentRegistry. WEBFLUX agents emit ServerSentEvent<DataMessage> with the
-	 * data already serialized as JSON, so Spring's codec can deserialize it directly.
-	 * SPRING_MVC agents use SseEmitter and emit ServerSentEvent<String> where the
-	 * data field contains raw JSON that must be parsed manually.
-	 */
+	
 	private void executeAgent(String originalGoal, String accumulatedContext,
 			Sinks.Many<ServerSentEvent<DataMessage>> pipe, int depth, DecisionResult res, String conversationId) {
 
@@ -144,11 +154,7 @@ public class ExecutingDynamicOrchestratorService {
 		}
 	}
 
-	/**
-	 * Handles Spring MVC agents that use SseEmitter.
-	 * SseEmitter sends the data as a raw JSON string inside the SSE "data:" field,
-	 * so we receive ServerSentEvent<String> and deserialize manually.
-	 */
+	
 	private void executingWebClientSpringMvc(String originalGoal, String accumulatedContext,
 			Sinks.Many<ServerSentEvent<DataMessage>> pipe, int depth, DecisionResult res, String conversationId) {
 
@@ -164,23 +170,30 @@ public class ExecutingDynamicOrchestratorService {
 				.bodyToFlux(typeRef)
 				.doOnNext(token -> {
 					String rawData = token.data();
-					if (Objects.nonNull(rawData) && !rawData.isBlank() && !rawData.equals("Image generation started for prompt")) {
-						DataMessage data = new DataMessage();
-						data.setMessage(rawData);
-						ServerSentEvent<DataMessage> mapped = ServerSentEvent
-								.<DataMessage>builder()
-								.id(token.id())
-								.event(token.event())
-								.data(data)
-								.build();
-						pipe.tryEmitNext(mapped);
+					if (Objects.nonNull(rawData) && !rawData.isBlank()) {
 						stepBuffer.append(rawData);
+						if (!rawData.equals("Image generation started for prompt")) {
+							DataMessage data = new DataMessage();
+							data.setMessage(rawData);
+							ServerSentEvent<DataMessage> mapped = ServerSentEvent
+									.<DataMessage>builder()
+									.id(token.id())
+									.event(token.event())
+									.data(data)
+									.build();
+							pipe.tryEmitNext(mapped);
+						}
 					}
 				})
 				.doOnError(pipe::tryEmitError)
 				.doOnComplete(() -> {
-					String stepSummary = buildStepSummary(res, stepBuffer.toString());
-					processStep(originalGoal, buildNextContext(accumulatedContext, stepSummary), pipe, depth + 1, conversationId);
+					String stepSummary = buildStepSummary(res, stepBuffer.toString(), depth);
+					String nextContext = buildNextContext(accumulatedContext, stepSummary);
+					String key = CONTEXT_KEY_PREFIX + conversationId;
+					redisTemplate.opsForValue()
+				        .set(key, nextContext, CONTEXT_TTL)
+				        .subscribe();
+					processStep(originalGoal, nextContext, pipe, depth + 1, conversationId);
 				})
 				.subscribe();
 	}
@@ -201,7 +214,7 @@ public class ExecutingDynamicOrchestratorService {
 	private static final Pattern BASE64_PATTERN =
 			Pattern.compile("^[A-Za-z0-9+/\\s]{200,}={0,2}$");
 
-	private String buildStepSummary(DecisionResult res, String rawOutput) {
+	private String buildStepSummary(DecisionResult res, String rawOutput, int stepNumber) {
 		String truncatedInput = (res.input() != null && res.input().length() > 300)
 				? res.input().substring(0, 300) + "..."
 				: res.input();
@@ -221,8 +234,8 @@ public class ExecutingDynamicOrchestratorService {
 				outputSummary = truncateStepOutput(rawOutput);
 			}
 		}
-		return String.format("[Step completed – Agent: '%s' | Input: %s | Result: %s]",
-				res.agent(), truncatedInput, outputSummary);
+		return String.format("[Step %d completed – Agent: '%s' | Input: %s | Result: %s]",
+				stepNumber + 1, res.agent(), truncatedInput, outputSummary);
 	}
 
 	/**
@@ -245,7 +258,6 @@ public class ExecutingDynamicOrchestratorService {
 		String truncatedStep = truncateStepOutput(stepOutput);
 		String combined = accumulatedContext + "\n" + truncatedStep;
 		if (combined.length() <= MAX_CONTEXT_CHARS) return combined;
-		// Keep the tail so the most recent information survives
 		return "[...earlier context trimmed...]\n"
 				+ combined.substring(combined.length() - MAX_CONTEXT_CHARS);
 	}
