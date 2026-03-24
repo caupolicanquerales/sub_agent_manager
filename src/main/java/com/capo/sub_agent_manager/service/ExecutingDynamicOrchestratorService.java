@@ -3,6 +3,7 @@ package com.capo.sub_agent_manager.service;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.BiConsumer;
 import java.util.regex.Pattern;
 
 import org.springframework.ai.chat.client.ChatClient;
@@ -39,7 +40,10 @@ public class ExecutingDynamicOrchestratorService {
 	
 	private static final String CONTEXT_KEY_PREFIX = "orchestrator:context:";
     private static final Duration CONTEXT_TTL = Duration.ofHours(1);
-	
+    
+    private static final ParameterizedTypeReference<ServerSentEvent<String>> STRING_SSE_TYPE = new ParameterizedTypeReference<>() {};
+    private static final ParameterizedTypeReference<ServerSentEvent<DataMessage>> DATA_MSG_SSE_TYPE = new ParameterizedTypeReference<>() {};
+    
 	public ExecutingDynamicOrchestratorService(@Qualifier("chatClientOrchestrator") ChatClient chatClient,
 			WebClient webClient, AgentRegistry registry,
 			ObjectMapper mapper,
@@ -106,11 +110,10 @@ public class ExecutingDynamicOrchestratorService {
         	}, pipe::tryEmitError);
     }
 
-	private void executingWebClientToWebFlux(String originalGoal, String accumulatedContext,
-			Sinks.Many<ServerSentEvent<DataMessage>> pipe, int depth, DecisionResult res, String conversationId) {
-		
-		ParameterizedTypeReference<ServerSentEvent<DataMessage>> typeRef = 
-			    new ParameterizedTypeReference<>() {};
+	private <T> void executingWebClient(String originalGoal, String accumulatedContext,
+			Sinks.Many<ServerSentEvent<DataMessage>> pipe, int depth, DecisionResult res, String conversationId,
+			ParameterizedTypeReference<ServerSentEvent<T>> typeRef,
+			BiConsumer<StringBuilder, ServerSentEvent<T>> tokenProcessor) {
 		
 		StringBuilder stepBuffer = new StringBuilder();
 		webClient.post()
@@ -119,14 +122,7 @@ public class ExecutingDynamicOrchestratorService {
 			.accept(MediaType.TEXT_EVENT_STREAM)
 			.retrieve()
 			.bodyToFlux(typeRef)
-			.doOnNext(token -> {
-				DataMessage data = token.data();
-				if (Objects.nonNull(data)) {
-					String content = data.getMessage();
-					pipe.tryEmitNext(token);
-					stepBuffer.append(content);
-				}
-			})
+			.doOnNext(token -> tokenProcessor.accept(stepBuffer, token))
 			.doOnError(pipe::tryEmitError)
 			.doOnComplete(() -> {
 				String stepSummary = buildStepSummary(res, stepBuffer.toString(), depth);
@@ -144,58 +140,46 @@ public class ExecutingDynamicOrchestratorService {
 	private void executeAgent(String originalGoal, String accumulatedContext,
 			Sinks.Many<ServerSentEvent<DataMessage>> pipe, int depth, DecisionResult res, String conversationId) {
 
-		AgentType type = registry.getAgentTypes()
-				.getOrDefault(res.agent(), AgentType.WEBFLUX);
+		AgentType type = registry.getAgentTypes().getOrDefault(res.agent(), AgentType.WEBFLUX);
 
 		if (AgentType.WEBFLUX.equals(type)) {
-			executingWebClientToWebFlux(originalGoal, accumulatedContext, pipe, depth, res, conversationId);
+			executingWebClient(originalGoal, accumulatedContext, pipe, depth, res, conversationId,
+					DATA_MSG_SSE_TYPE, (buf, tok) -> processingTokenToWebflux(pipe, buf, tok));
 		} else {
-			executingWebClientSpringMvc(originalGoal, accumulatedContext, pipe, depth, res, conversationId);
+			executingWebClient(originalGoal, accumulatedContext, pipe, depth, res, conversationId,
+					STRING_SSE_TYPE, (buf, tok) -> processingTokenToMvc(pipe, buf, tok));
 		}
 	}
-
 	
-	private void executingWebClientSpringMvc(String originalGoal, String accumulatedContext,
-			Sinks.Many<ServerSentEvent<DataMessage>> pipe, int depth, DecisionResult res, String conversationId) {
-
-		ParameterizedTypeReference<ServerSentEvent<String>> typeRef =
-				new ParameterizedTypeReference<>() {};
-
-		StringBuilder stepBuffer = new StringBuilder();
-		webClient.post()
-				.uri(registry.getAgents().get(res.agent()))
-				.bodyValue(setSubAgentRequest(res.input()))
-				.accept(MediaType.TEXT_EVENT_STREAM)
-				.retrieve()
-				.bodyToFlux(typeRef)
-				.doOnNext(token -> {
-					String rawData = token.data();
-					if (Objects.nonNull(rawData) && !rawData.isBlank()) {
-						stepBuffer.append(rawData);
-						if (!rawData.equals("Image generation started for prompt")) {
-							DataMessage data = new DataMessage();
-							data.setMessage(rawData);
-							ServerSentEvent<DataMessage> mapped = ServerSentEvent
-									.<DataMessage>builder()
-									.id(token.id())
-									.event(token.event())
-									.data(data)
-									.build();
-							pipe.tryEmitNext(mapped);
-						}
-					}
-				})
-				.doOnError(pipe::tryEmitError)
-				.doOnComplete(() -> {
-					String stepSummary = buildStepSummary(res, stepBuffer.toString(), depth);
-					String nextContext = buildNextContext(accumulatedContext, stepSummary);
-					String key = CONTEXT_KEY_PREFIX + conversationId;
-					redisTemplate.opsForValue()
-				        .set(key, nextContext, CONTEXT_TTL)
-				        .subscribe();
-					processStep(originalGoal, nextContext, pipe, depth + 1, conversationId);
-				})
-				.subscribe();
+	private void processingTokenToWebflux(Sinks.Many<ServerSentEvent<DataMessage>> pipe, StringBuilder stepBuffer,
+			ServerSentEvent<DataMessage> token) {
+		DataMessage data = token.data();
+		if (Objects.nonNull(data)) {
+			String content = data.getMessage();
+			stepBuffer.append(content);
+			if (content != null && !content.endsWith("-COMPLETED")) {
+				pipe.tryEmitNext(token);
+			}
+		}
+	}
+	
+	private void processingTokenToMvc(Sinks.Many<ServerSentEvent<DataMessage>> pipe, StringBuilder stepBuffer,
+			ServerSentEvent<String> token) {
+		String rawData = token.data();
+		if (Objects.nonNull(rawData) && !rawData.isBlank()) {
+			stepBuffer.append(rawData);
+			if (!rawData.equals("Image generation started for prompt") && !rawData.endsWith("-COMPLETED")) {
+				DataMessage data = new DataMessage();
+				data.setMessage(rawData);
+				ServerSentEvent<DataMessage> mapped = ServerSentEvent
+						.<DataMessage>builder()
+						.id(token.id())
+						.event(token.event())
+						.data(data)
+						.build();
+				pipe.tryEmitNext(mapped);
+			}
+		}
 	}
 	
 	private SubAgentRequest setSubAgentRequest(String prompt) {
@@ -203,6 +187,7 @@ public class ExecutingDynamicOrchestratorService {
 		request.setPrompt(prompt);
 		return request;
 	}
+	
 
 	/**
 	 * Builds a human-readable summary of a completed agent step that is safe to
