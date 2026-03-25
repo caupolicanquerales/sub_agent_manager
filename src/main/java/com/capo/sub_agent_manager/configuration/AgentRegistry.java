@@ -20,6 +20,9 @@ public class AgentRegistry {
 	@Value(value="${url-general-chat}")
 	private String urlGeneralChat;
 
+	@Value(value="${url-build-template}")
+	private String urlBuildTemplate;
+	
 	@Value(value="${agent-type-html:WEBFLUX}")
 	private AgentType agentTypeHtml;
 
@@ -31,13 +34,17 @@ public class AgentRegistry {
 	
 	@Value(value="${agent-type-image:SPRING_MVC}")
 	private AgentType agentTypeImage;
+	
+	@Value(value="${agent-type-build-template:SPRING_MVC}")
+	private AgentType agentTypeBuildTemplate;
 
 	public Map<String, String> getAgents() {
         return Map.of(
             "html", urlHtml,
             "improver", urlImprover,
             "image", urlImage,
-            "general", urlGeneralChat
+            "general", urlGeneralChat,
+            "buildTemplate",urlBuildTemplate
         );
     }
 
@@ -46,7 +53,8 @@ public class AgentRegistry {
             "html", agentTypeHtml,
             "improver", agentTypeImprover,
             "image", agentTypeImage,
-            "general", agentTypeGeneralChat
+            "general", agentTypeGeneralChat,
+            "buildTemplate",agentTypeBuildTemplate
         );
     }
 	

@@ -7,6 +7,7 @@ import java.util.function.BiConsumer;
 import java.util.regex.Pattern;
 
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
@@ -37,6 +38,7 @@ public class ExecutingDynamicOrchestratorService {
 	private final AgentRegistry registry;
 	private final ObjectMapper mapper;
 	private final ReactiveStringRedisTemplate redisTemplate;
+	private final String systemPrompt;
 	
 	private static final String CONTEXT_KEY_PREFIX = "orchestrator:context:";
     private static final Duration CONTEXT_TTL = Duration.ofHours(1);
@@ -47,12 +49,14 @@ public class ExecutingDynamicOrchestratorService {
 	public ExecutingDynamicOrchestratorService(@Qualifier("chatClientOrchestrator") ChatClient chatClient,
 			WebClient webClient, AgentRegistry registry,
 			ObjectMapper mapper,
-			ReactiveStringRedisTemplate redisTemplate) {
+			ReactiveStringRedisTemplate redisTemplate,
+			@Qualifier("systemPrompt") String systemPrompt) {
 		this.chatClient= chatClient;
 		this.webClient= webClient;
 		this.registry= registry;
 		this.mapper= mapper;
 		this.redisTemplate=redisTemplate;
+		this.systemPrompt= systemPrompt;
 	}
 	
 	public Flux<ServerSentEvent<DataMessage>> handleDynamicOrchestrator(GenerationSyntheticDataRequest request) {
@@ -79,15 +83,16 @@ public class ExecutingDynamicOrchestratorService {
         }
 
         Map<String, Object> model = Map.of(
-        	    "goal", originalGoal,
-        	    "context", accumulatedContext,
-        	    "agents", registry.getAgents()
+        	    "goal", depth == 0 ? originalGoal : "A previous step was executed. Review the Context and return FINAL if the original task is satisfied.",
+        	    "context", accumulatedContext.isBlank() ? "none" : accumulatedContext,
+        	    "agents", registry.getAgents().keySet()
         	);
 
         Mono.fromCallable(() -> chatClient.prompt()
+        		.messages(new SystemMessage(systemPrompt))
         		.user(u -> u.text("Current Goal: {goal}\nContext: {context}\nAvailable: {agents}")
         	               .params(model))
-        		.advisors(a -> a.param("chat_memory_conversation_id", conversationId))
+        		.advisors(a -> a.param("chat_memory_conversation_id", conversationId + ":orch:" + depth))
         		.call()
         		.content())
         	.subscribeOn(Schedulers.boundedElastic())
@@ -156,8 +161,8 @@ public class ExecutingDynamicOrchestratorService {
 		DataMessage data = token.data();
 		if (Objects.nonNull(data)) {
 			String content = data.getMessage();
-			stepBuffer.append(content);
 			if (content != null && !content.endsWith("-COMPLETED")) {
+				stepBuffer.append(content);
 				pipe.tryEmitNext(token);
 			}
 		}
@@ -232,11 +237,15 @@ public class ExecutingDynamicOrchestratorService {
 	private static final int MAX_STEP_OUTPUT_CHARS = 2_000;
 	private static final int MAX_CONTEXT_CHARS     = 8_000;
 
+	private static final java.util.regex.Pattern HTML_TAG_PATTERN = java.util.regex.Pattern.compile("<[^>]{1,100}>");
+
 	private String truncateStepOutput(String raw) {
 		if (raw == null) return "";
-		if (raw.length() <= MAX_STEP_OUTPUT_CHARS) return raw;
-		return raw.substring(0, MAX_STEP_OUTPUT_CHARS)
-				+ "\n[...output truncated, " + (raw.length() - MAX_STEP_OUTPUT_CHARS) + " chars omitted...]";
+		// Strip HTML tags so the LLM does not re-detect them as new input to route
+		String sanitized = HTML_TAG_PATTERN.matcher(raw).replaceAll("[tag]");
+		if (sanitized.length() <= MAX_STEP_OUTPUT_CHARS) return sanitized;
+		return sanitized.substring(0, MAX_STEP_OUTPUT_CHARS)
+				+ "\n[...output truncated, " + (sanitized.length() - MAX_STEP_OUTPUT_CHARS) + " chars omitted...]";
 	}
 
 	private String buildNextContext(String accumulatedContext, String stepOutput) {
