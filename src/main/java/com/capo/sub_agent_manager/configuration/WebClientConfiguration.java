@@ -25,8 +25,8 @@ import reactor.netty.resources.ConnectionProvider;
 public class WebClientConfiguration {
 
     /**
-     * Shared Netty HttpClient with extended timeouts.
-     * Reused by both WebClient (reactive / sub-agents) and RestClient (Spring AI → OpenAI).
+     * Netty HttpClient for outbound OpenAI / REST calls.
+     * Has explicit read/write/response timeouts — appropriate for request-response calls.
      */
     @Bean
     public HttpClient httpClient() {
@@ -45,24 +45,46 @@ public class WebClientConfiguration {
                         .addHandlerLast(new WriteTimeoutHandler(180, TimeUnit.SECONDS)));
     }
 
+    /**
+     * Dedicated Netty HttpClient for long-lived SSE streams to internal sub-agents.
+     * NO ReadTimeoutHandler and NO responseTimeout: SSE connections go silent during
+     * tool calls (e.g. image generation), so a channel-level read timeout would kill
+     * perfectly valid streams. Timeout discipline is handled at the Reactor operator
+     * level inside each service instead.
+     */
+    @Bean
+    public HttpClient sseHttpClient() {
+        ConnectionProvider provider = ConnectionProvider.builder("sse-agent-pool")
+                .maxConnections(50)
+                .maxIdleTime(Duration.ofMinutes(10))
+                .maxLifeTime(Duration.ofMinutes(30))
+                .pendingAcquireTimeout(Duration.ofSeconds(60))
+                .evictInBackground(Duration.ofSeconds(120))
+                .build();
+        return HttpClient.create(provider)
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 30_000);
+        // Intentionally no responseTimeout / ReadTimeoutHandler:
+        // sub-agent SSE streams can be silent for minutes while tools run.
+    }
+
 	@Bean
     public WebClient webClient(@Qualifier("webClientBuilder") WebClient.Builder builder) {
         return builder.build();
     }
 	
 	@Bean
-    public WebClient.Builder webClientBuilder(HttpClient httpClient) {
+    public WebClient.Builder webClientBuilder(@Qualifier("sseHttpClient") HttpClient sseHttpClient) {
         ExchangeStrategies strategies = ExchangeStrategies.builder()
                 .codecs(configurer -> configurer.defaultCodecs()
                         .maxInMemorySize(10 * 1024 * 1024)) // 10 MB — large enough for image SSE payloads
                 .build();
         return WebClient.builder()
-                .clientConnector(new ReactorClientHttpConnector(Objects.requireNonNull(httpClient)))
+                .clientConnector(new ReactorClientHttpConnector(Objects.requireNonNull(sseHttpClient)))
                 .exchangeStrategies(strategies);
     }
 
     /**
-     * Custom RestClient.Builder with the same extended-timeout Netty client.
+     * Custom RestClient.Builder with the extended-timeout Netty client.
      * Spring AI's OpenAiAutoConfiguration injects RestClient.Builder to build OpenAiApi,
      * so this bean overrides the Spring Boot default (allow-bean-definition-overriding=true).
      * Without this, Spring AI uses Netty's 30s default read timeout and times out on slow models.

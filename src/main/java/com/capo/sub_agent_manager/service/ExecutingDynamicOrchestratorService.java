@@ -123,7 +123,7 @@ public class ExecutingDynamicOrchestratorService {
 		StringBuilder stepBuffer = new StringBuilder();
 		webClient.post()
 			.uri(registry.getAgents().get(res.agent()))
-			.bodyValue(setSubAgentRequest(res.input()))
+			.bodyValue(setSubAgentRequest(originalGoal))
 			.accept(MediaType.TEXT_EVENT_STREAM)
 			.retrieve()
 			.bodyToFlux(typeRef)

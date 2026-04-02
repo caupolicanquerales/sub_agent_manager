@@ -43,6 +43,6 @@ Ensure all double quotes within the "input" and "reasoning" values are properly 
 {
   "selected_agent": "buildTemplate" | "html" | "improver" | "image" | "general",
   "action": "CALL" | "FINAL",
-  "input": "string",
+  "input": "A short human-readable label describing what is being routed (e.g., 'template construction with HTML and invoice data'). NEVER paste or embed the raw Current Goal content here. Keep this field under 30 words.",
   "reasoning": "string"
 }
