@@ -23,6 +23,9 @@ public class AgentRegistry {
 	@Value(value="${url-build-template}")
 	private String urlBuildTemplate;
 	
+	@Value(value="${url-visual-effects}")
+	private String urlVisualEffects;
+	
 	@Value(value="${agent-type-html:WEBFLUX}")
 	private AgentType agentTypeHtml;
 
@@ -37,6 +40,9 @@ public class AgentRegistry {
 	
 	@Value(value="${agent-type-build-template:SPRING_MVC}")
 	private AgentType agentTypeBuildTemplate;
+	
+	@Value(value="${agent-type-visual-effects:SPRING_MVC}")
+	private AgentType agentTypeVisualEffects;
 
 	public Map<String, String> getAgents() {
         return Map.of(
@@ -44,7 +50,8 @@ public class AgentRegistry {
             "improver", urlImprover,
             "image", urlImage,
             "general", urlGeneralChat,
-            "buildTemplate",urlBuildTemplate
+            "buildTemplate",urlBuildTemplate,
+            "visualEffects",urlVisualEffects
         );
     }
 
@@ -54,7 +61,39 @@ public class AgentRegistry {
             "improver", agentTypeImprover,
             "image", agentTypeImage,
             "general", agentTypeGeneralChat,
-            "buildTemplate",agentTypeBuildTemplate
+            "buildTemplate",agentTypeBuildTemplate,
+            "visualEffects",agentTypeVisualEffects
+        );
+    }
+	
+	/**
+	 * Agents whose SSE output IS a raw base64 image that should be stored in Redis.
+	 * Do NOT include agents whose output is LLM text even if they transform images
+	 * (e.g. visualEffects stores the result internally via its own Redis tool call).
+	 */
+	public Map<String, Boolean> getAgentProducingImage() {
+        return Map.of(
+            "image", Boolean.TRUE,
+            "buildTemplate", Boolean.TRUE,
+            "visualEffects", Boolean.FALSE,
+            "html", Boolean.FALSE,
+            "improver", Boolean.FALSE,
+            "general", Boolean.FALSE
+        );
+    }
+
+	/**
+	 * Agents that require an existing image Redis key as input (imageReferences).
+	 * These agents read the current image from Redis but may or may not stream base64 back.
+	 */
+	public Map<String, Boolean> getAgentNeedingImageInput() {
+        return Map.of(
+            "visualEffects", Boolean.TRUE,
+            "image", Boolean.FALSE,
+            "buildTemplate", Boolean.FALSE,
+            "html", Boolean.FALSE,
+            "improver", Boolean.FALSE,
+            "general", Boolean.FALSE
         );
     }
 	

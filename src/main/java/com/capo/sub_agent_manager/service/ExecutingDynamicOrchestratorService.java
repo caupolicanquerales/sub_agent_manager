@@ -1,9 +1,11 @@
 package com.capo.sub_agent_manager.service;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.BiConsumer;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.springframework.ai.chat.client.ChatClient;
@@ -62,8 +64,32 @@ public class ExecutingDynamicOrchestratorService {
 	public Flux<ServerSentEvent<DataMessage>> handleDynamicOrchestrator(GenerationSyntheticDataRequest request) {
         Sinks.Many<ServerSentEvent<DataMessage>> userPipe = Sinks.many().unicast().onBackpressureBuffer();
         String key = CONTEXT_KEY_PREFIX + request.getConversationId();
+
+        // If the caller provides an image reference (e.g. user uploaded an image via the chat UI),
+        // store it at the canonical key and seed the context so sub-agents can find it.
+        List<String> imageRefs = request.getImageReferences();
+        if (imageRefs != null && !imageRefs.isEmpty()) {
+            String uploadedImageKey = imageRefs.get(0);
+            String canonicalKey = "image:latest:" + request.getConversationId();
+            // Copy the uploaded image to the canonical orchestrator key only if they differ
+            if (!canonicalKey.equals(uploadedImageKey)) {
+                redisTemplate.opsForValue().get(uploadedImageKey)
+                    .flatMap(imageData -> redisTemplate.opsForValue().set(canonicalKey, imageData, CONTEXT_TTL))
+                    .subscribe();
+            }
+        }
+
         redisTemplate.opsForValue().get(key)
             .defaultIfEmpty("")
+            .map(previousContext -> {
+                // Inject the canonical image key into context if an image was provided and not already tracked
+                if (imageRefs != null && !imageRefs.isEmpty()
+                        && !previousContext.contains("IMAGE_KEY:")) {
+                    String canonicalKey = "image:latest:" + request.getConversationId();
+                    return previousContext + "\n[Image available | IMAGE_KEY:" + canonicalKey + "]";
+                }
+                return previousContext;
+            })
             .subscribe(previousContext ->
                 processStep(request.getPrompt(), previousContext,
                             userPipe, 0, request.getConversationId())
@@ -123,14 +149,25 @@ public class ExecutingDynamicOrchestratorService {
 		StringBuilder stepBuffer = new StringBuilder();
 		webClient.post()
 			.uri(registry.getAgents().get(res.agent()))
-			.bodyValue(setSubAgentRequest(originalGoal))
+			.bodyValue(setSubAgentRequest(res.agent(),accumulatedContext,originalGoal))
 			.accept(MediaType.TEXT_EVENT_STREAM)
 			.retrieve()
 			.bodyToFlux(typeRef)
 			.doOnNext(token -> tokenProcessor.accept(stepBuffer, token))
 			.doOnError(pipe::tryEmitError)
 			.doOnComplete(() -> {
-				String stepSummary = buildStepSummary(res, stepBuffer.toString(), depth);
+				String rawOutput = stepBuffer.toString();
+				String imageRedisKey = null;
+				if (Boolean.TRUE.equals(registry.getAgentProducingImage().get(res.agent()))) {
+					// Agent streams base64 image via SSE – store it in Redis
+					imageRedisKey = "image:latest:" + conversationId;
+					redisTemplate.opsForValue().set(imageRedisKey, rawOutput, CONTEXT_TTL).subscribe();
+				} else if (Boolean.TRUE.equals(registry.getAgentNeedingImageInput().get(res.agent()))) {
+					// Agent consumed and internally updated the image in Redis via its tool.
+					// Only track the key for the context – do NOT overwrite with the LLM text output.
+					imageRedisKey = "image:latest:" + conversationId;
+				}
+				String stepSummary = buildStepSummary(res, rawOutput, depth, imageRedisKey);
 				String nextContext = buildNextContext(accumulatedContext, stepSummary);
 				String key = CONTEXT_KEY_PREFIX + conversationId;
 				redisTemplate.opsForValue()
@@ -172,8 +209,8 @@ public class ExecutingDynamicOrchestratorService {
 			ServerSentEvent<String> token) {
 		String rawData = token.data();
 		if (Objects.nonNull(rawData) && !rawData.isBlank()) {
-			stepBuffer.append(rawData);
 			if (!rawData.equals("Image generation started for prompt") && !rawData.endsWith("-COMPLETED")) {
+				stepBuffer.append(rawData);
 				DataMessage data = new DataMessage();
 				data.setMessage(rawData);
 				ServerSentEvent<DataMessage> mapped = ServerSentEvent
@@ -187,10 +224,27 @@ public class ExecutingDynamicOrchestratorService {
 		}
 	}
 	
-	private SubAgentRequest setSubAgentRequest(String prompt) {
-		SubAgentRequest request= new SubAgentRequest();
+	private SubAgentRequest setSubAgentRequest(String agent, String accumulatedContext, String prompt) {
+		SubAgentRequest request = new SubAgentRequest();
 		request.setPrompt(prompt);
+		// Pass imageReferences to agents that need an existing image as input
+		if (Boolean.TRUE.equals(registry.getAgentNeedingImageInput().get(agent))) {
+			String imageKey = extractLatestImageKey(accumulatedContext);
+			if (imageKey != null) {
+				request.setImageReferences(List.of(imageKey));
+			}
+		}
 		return request;
+	}
+
+	private String extractLatestImageKey(String context) {
+		if (context == null || context.isBlank()) return null;
+		Matcher matcher = IMAGE_KEY_PATTERN.matcher(context);
+		String lastKey = null;
+		while (matcher.find()) {
+			lastKey = matcher.group(1).trim();
+		}
+		return lastKey;
 	}
 	
 
@@ -204,7 +258,9 @@ public class ExecutingDynamicOrchestratorService {
 	private static final Pattern BASE64_PATTERN =
 			Pattern.compile("^[A-Za-z0-9+/\\s]{200,}={0,2}$");
 
-	private String buildStepSummary(DecisionResult res, String rawOutput, int stepNumber) {
+	private static final Pattern IMAGE_KEY_PATTERN = Pattern.compile("IMAGE_KEY:([^|\\]]+)");
+
+	private String buildStepSummary(DecisionResult res, String rawOutput, int stepNumber, String imageRedisKey) {
 		String truncatedInput = (res.input() != null && res.input().length() > 300)
 				? res.input().substring(0, 300) + "..."
 				: res.input();
@@ -224,8 +280,9 @@ public class ExecutingDynamicOrchestratorService {
 				outputSummary = truncateStepOutput(rawOutput);
 			}
 		}
-		return String.format("[Step %d completed – Agent: '%s' | Input: %s | Result: %s]",
-				stepNumber + 1, res.agent(), truncatedInput, outputSummary);
+		String imagePart = imageRedisKey != null ? " | IMAGE_KEY:" + imageRedisKey : "";
+		return String.format("[Step %d completed – Agent: '%s' | Input: %s | Result: %s%s]",
+				stepNumber + 1, res.agent(), truncatedInput, outputSummary, imagePart);
 	}
 
 	/**
