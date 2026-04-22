@@ -26,6 +26,9 @@ public class AgentRegistry {
 	@Value(value="${url-visual-effects}")
 	private String urlVisualEffects;
 	
+	@Value(value="${url-layout-architect}")
+	private String urlLayoutArchitect;
+	
 	@Value(value="${agent-type-html:WEBFLUX}")
 	private AgentType agentTypeHtml;
 
@@ -43,6 +46,9 @@ public class AgentRegistry {
 	
 	@Value(value="${agent-type-visual-effects:SPRING_MVC}")
 	private AgentType agentTypeVisualEffects;
+	
+	@Value(value="${agent-type-layout-architect:SPRING_MVC}")
+	private AgentType agentTypeLayoutArchitect;
 
 	public Map<String, String> getAgents() {
         return Map.of(
@@ -51,7 +57,8 @@ public class AgentRegistry {
             "image", urlImage,
             "general", urlGeneralChat,
             "buildTemplate",urlBuildTemplate,
-            "visualEffects",urlVisualEffects
+            "visualEffects",urlVisualEffects,
+            "layoutArchitect",urlLayoutArchitect
         );
     }
 
@@ -62,10 +69,28 @@ public class AgentRegistry {
             "image", agentTypeImage,
             "general", agentTypeGeneralChat,
             "buildTemplate",agentTypeBuildTemplate,
-            "visualEffects",agentTypeVisualEffects
+            "visualEffects",agentTypeVisualEffects,
+            "layoutArchitect",agentTypeLayoutArchitect
         );
     }
 	
+	/**
+	 * Agents whose SSE output IS a large JSON/HTML+CSS string that should be stored in Redis
+	 * under the key "layout:latest:{conversationId}" so that other agents (or a subsequent
+	 * call to layoutArchitect itself) can retrieve it as the current working template.
+	 */
+	public Map<String, Boolean> getAgentProducingLongString() {
+        return Map.of(
+            "layoutArchitect", Boolean.TRUE,
+            "image", Boolean.FALSE,
+            "buildTemplate", Boolean.FALSE,
+            "visualEffects", Boolean.FALSE,
+            "html", Boolean.FALSE,
+            "improver", Boolean.FALSE,
+            "general", Boolean.FALSE
+        );
+    }
+
 	/**
 	 * Agents whose SSE output IS a raw base64 image that should be stored in Redis.
 	 * Do NOT include agents whose output is LLM text even if they transform images
@@ -78,7 +103,8 @@ public class AgentRegistry {
             "visualEffects", Boolean.FALSE,
             "html", Boolean.FALSE,
             "improver", Boolean.FALSE,
-            "general", Boolean.FALSE
+            "general", Boolean.FALSE,
+			"layoutArchitect", Boolean.FALSE
         );
     }
 
@@ -93,7 +119,20 @@ public class AgentRegistry {
             "buildTemplate", Boolean.FALSE,
             "html", Boolean.FALSE,
             "improver", Boolean.FALSE,
-            "general", Boolean.FALSE
+            "general", Boolean.FALSE,
+			"layoutArchitect", Boolean.FALSE
+        );
+    }
+
+	public Map<String, Boolean> getAgentNeedingLongStringInput() {
+        return Map.of(
+            "visualEffects", Boolean.FALSE,
+            "image", Boolean.FALSE,
+            "buildTemplate", Boolean.FALSE,
+            "html", Boolean.FALSE,
+            "improver", Boolean.FALSE,
+            "general", Boolean.FALSE,
+			"layoutArchitect", Boolean.TRUE
         );
     }
 	

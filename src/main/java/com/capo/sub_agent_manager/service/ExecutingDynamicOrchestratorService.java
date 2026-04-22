@@ -167,7 +167,16 @@ public class ExecutingDynamicOrchestratorService {
 					// Only track the key for the context – do NOT overwrite with the LLM text output.
 					imageRedisKey = "image:latest:" + conversationId;
 				}
-				String stepSummary = buildStepSummary(res, rawOutput, depth, imageRedisKey);
+				String longStringRedisKey = null;
+				if (Boolean.TRUE.equals(registry.getAgentProducingLongString().get(res.agent()))) {
+					// Agent streams a large HTML/CSS JSON string – store it in Redis
+					longStringRedisKey = "layout:latest:" + conversationId;
+					redisTemplate.opsForValue().set(longStringRedisKey, rawOutput, CONTEXT_TTL).subscribe();
+				} else if (Boolean.TRUE.equals(registry.getAgentNeedingLongStringInput().get(res.agent()))) {
+					// Agent will have consumed the stored layout string; track the key for context.
+					longStringRedisKey = "layout:latest:" + conversationId;
+				}
+				String stepSummary = buildStepSummary(res, rawOutput, depth, imageRedisKey, longStringRedisKey);
 				String nextContext = buildNextContext(accumulatedContext, stepSummary);
 				String key = CONTEXT_KEY_PREFIX + conversationId;
 				redisTemplate.opsForValue()
@@ -234,12 +243,29 @@ public class ExecutingDynamicOrchestratorService {
 				request.setImageReferences(List.of(imageKey));
 			}
 		}
+		// Pass the stored layout Redis key to agents that need a long-string (HTML/CSS) as input
+		if (Boolean.TRUE.equals(registry.getAgentNeedingLongStringInput().get(agent))) {
+			String layoutKey = extractLatestStringKey(accumulatedContext);
+			if (layoutKey != null) {
+				request.setImageReferences(List.of(layoutKey));
+			}
+		}
 		return request;
 	}
 
 	private String extractLatestImageKey(String context) {
 		if (context == null || context.isBlank()) return null;
 		Matcher matcher = IMAGE_KEY_PATTERN.matcher(context);
+		String lastKey = null;
+		while (matcher.find()) {
+			lastKey = matcher.group(1).trim();
+		}
+		return lastKey;
+	}
+
+	private String extractLatestStringKey(String context) {
+		if (context == null || context.isBlank()) return null;
+		Matcher matcher = STRING_KEY_PATTERN.matcher(context);
 		String lastKey = null;
 		while (matcher.find()) {
 			lastKey = matcher.group(1).trim();
@@ -259,8 +285,9 @@ public class ExecutingDynamicOrchestratorService {
 			Pattern.compile("^[A-Za-z0-9+/\\s]{200,}={0,2}$");
 
 	private static final Pattern IMAGE_KEY_PATTERN = Pattern.compile("IMAGE_KEY:([^|\\]]+)");
+	private static final Pattern STRING_KEY_PATTERN = Pattern.compile("STRING_KEY:([^|\\]]+)");
 
-	private String buildStepSummary(DecisionResult res, String rawOutput, int stepNumber, String imageRedisKey) {
+	private String buildStepSummary(DecisionResult res, String rawOutput, int stepNumber, String imageRedisKey, String longStringRedisKey) {
 		String truncatedInput = (res.input() != null && res.input().length() > 300)
 				? res.input().substring(0, 300) + "..."
 				: res.input();
@@ -281,8 +308,9 @@ public class ExecutingDynamicOrchestratorService {
 			}
 		}
 		String imagePart = imageRedisKey != null ? " | IMAGE_KEY:" + imageRedisKey : "";
-		return String.format("[Step %d completed – Agent: '%s' | Input: %s | Result: %s%s]",
-				stepNumber + 1, res.agent(), truncatedInput, outputSummary, imagePart);
+		String stringPart = longStringRedisKey != null ? " | STRING_KEY:" + longStringRedisKey : "";
+		return String.format("[Step %d completed – Agent: '%s'%s%s | Input: %s | Result: %s]",
+				stepNumber + 1, res.agent(), imagePart, stringPart, truncatedInput, outputSummary);
 	}
 
 	/**
