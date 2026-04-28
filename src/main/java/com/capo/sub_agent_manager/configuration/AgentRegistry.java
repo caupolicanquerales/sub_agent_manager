@@ -29,6 +29,9 @@ public class AgentRegistry {
 	@Value(value="${url-layout-architect}")
 	private String urlLayoutArchitect;
 	
+	@Value(value="${url-synthetic-data}")
+	private String urlSyntheticData;
+	
 	@Value(value="${agent-type-html:WEBFLUX}")
 	private AgentType agentTypeHtml;
 
@@ -49,6 +52,9 @@ public class AgentRegistry {
 	
 	@Value(value="${agent-type-layout-architect:SPRING_MVC}")
 	private AgentType agentTypeLayoutArchitect;
+	
+	@Value(value="${agent-type-synthetic-data:WEBFLUX}")
+	private AgentType agentTypeSyntheticData;
 
 	public Map<String, String> getAgents() {
         return Map.of(
@@ -58,7 +64,8 @@ public class AgentRegistry {
             "general", urlGeneralChat,
             "buildTemplate",urlBuildTemplate,
             "visualEffects",urlVisualEffects,
-            "layoutArchitect",urlLayoutArchitect
+            "layoutArchitect",urlLayoutArchitect,
+            "syntheticData",urlSyntheticData
         );
     }
 
@@ -70,7 +77,8 @@ public class AgentRegistry {
             "general", agentTypeGeneralChat,
             "buildTemplate",agentTypeBuildTemplate,
             "visualEffects",agentTypeVisualEffects,
-            "layoutArchitect",agentTypeLayoutArchitect
+            "layoutArchitect",agentTypeLayoutArchitect,
+            "syntheticData",agentTypeSyntheticData
         );
     }
 	
@@ -87,7 +95,8 @@ public class AgentRegistry {
             "visualEffects", Boolean.FALSE,
             "html", Boolean.FALSE,
             "improver", Boolean.FALSE,
-            "general", Boolean.FALSE
+            "general", Boolean.FALSE,
+            "syntheticData", Boolean.FALSE
         );
     }
 
@@ -104,7 +113,8 @@ public class AgentRegistry {
             "html", Boolean.FALSE,
             "improver", Boolean.FALSE,
             "general", Boolean.FALSE,
-			"layoutArchitect", Boolean.FALSE
+			"layoutArchitect", Boolean.FALSE,
+			"syntheticData", Boolean.FALSE
         );
     }
 
@@ -120,7 +130,8 @@ public class AgentRegistry {
             "html", Boolean.FALSE,
             "improver", Boolean.FALSE,
             "general", Boolean.FALSE,
-			"layoutArchitect", Boolean.FALSE
+			"layoutArchitect", Boolean.FALSE,
+			"syntheticData", Boolean.FALSE
         );
     }
 
@@ -132,7 +143,43 @@ public class AgentRegistry {
             "html", Boolean.FALSE,
             "improver", Boolean.FALSE,
             "general", Boolean.FALSE,
-			"layoutArchitect", Boolean.TRUE
+			"layoutArchitect", Boolean.TRUE,
+			"syntheticData", Boolean.FALSE
+        );
+    }
+
+	/**
+	 * Agents whose SSE output IS synthetic data that should be stored in Redis
+	 * under the key "jsonData:latest:{conversationId}" so that iteration calls
+	 * can retrieve the previously generated dataset.
+	 */
+	public Map<String, Boolean> getAgentProducingJsonData() {
+        return Map.of(
+            "syntheticData", Boolean.TRUE,
+            "layoutArchitect", Boolean.FALSE,
+            "image", Boolean.FALSE,
+            "buildTemplate", Boolean.FALSE,
+            "visualEffects", Boolean.FALSE,
+            "html", Boolean.FALSE,
+            "improver", Boolean.FALSE,
+            "general", Boolean.FALSE
+        );
+    }
+
+	/**
+	 * Agents that require an existing JSON data Redis key as input (imageReferences).
+	 * These agents read the current JSON schema or generated dataset from Redis.
+	 */
+	public Map<String, Boolean> getAgentNeedingJsonDataInput() {
+        return Map.of(
+            "syntheticData", Boolean.TRUE,
+            "layoutArchitect", Boolean.FALSE,
+            "image", Boolean.FALSE,
+            "buildTemplate", Boolean.FALSE,
+            "visualEffects", Boolean.FALSE,
+            "html", Boolean.FALSE,
+            "improver", Boolean.FALSE,
+            "general", Boolean.FALSE
         );
     }
 	
