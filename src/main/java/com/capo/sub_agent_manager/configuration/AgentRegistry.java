@@ -182,5 +182,41 @@ public class AgentRegistry {
             "general", Boolean.FALSE
         );
     }
-	
+
+	/**
+	 * Agents whose SSE output IS a descriptive image-generation prompt (plain text)
+	 * that should be stored in Redis under "prompt:latest:{conversationId}" so that
+	 * downstream agents (e.g. "image") can use it as their actual prompt instead of
+	 * the raw user message.
+	 */
+	public Map<String, Boolean> getAgentProducingPrompt() {
+        return Map.of(
+            "html", Boolean.TRUE,
+            "image", Boolean.FALSE,
+            "buildTemplate", Boolean.FALSE,
+            "visualEffects", Boolean.FALSE,
+            "layoutArchitect", Boolean.FALSE,
+            "syntheticData", Boolean.FALSE,
+            "improver", Boolean.FALSE,
+            "general", Boolean.FALSE
+        );
+    }
+
+	/**
+	 * Agents that should receive the stored prompt (PROMPT_KEY) as their request
+	 * prompt instead of the raw user message.
+	 */
+	public Map<String, Boolean> getAgentNeedingPromptInput() {
+        return Map.of(
+            "image", Boolean.TRUE,
+            "html", Boolean.FALSE,
+            "buildTemplate", Boolean.FALSE,
+            "visualEffects", Boolean.FALSE,
+            "layoutArchitect", Boolean.FALSE,
+            "syntheticData", Boolean.FALSE,
+            "improver", Boolean.TRUE,
+            "general", Boolean.FALSE
+        );
+    }
+
 }

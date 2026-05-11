@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.BiConsumer;
+import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -40,6 +41,7 @@ public class ExecutingDynamicOrchestratorService {
 	private static final String IMAGE_KEY_PREFIX     = "image:latest:";
 	private static final String LAYOUT_KEY_PREFIX    = "layout:latest:";
 	private static final String JSON_DATA_KEY_PREFIX = "jsonData:latest:";
+	private static final String PROMPT_KEY_PREFIX    = "prompt:latest:";
 	private static final Duration CONTEXT_TTL        = Duration.ofHours(1);
 
 	// ── Orchestration limits ─────────────────────────────────────────────────────
@@ -53,6 +55,7 @@ public class ExecutingDynamicOrchestratorService {
 	private static final Pattern IMAGE_KEY_PATTERN  = Pattern.compile("IMAGE_KEY:([^|\\]]+)");
 	private static final Pattern STRING_KEY_PATTERN = Pattern.compile("STRING_KEY:([^|\\]]+)");
 	private static final Pattern JSON_KEY_PATTERN   = Pattern.compile("JSON_KEY:([^|\\]]+)");
+	private static final Pattern PROMPT_KEY_PATTERN = Pattern.compile("PROMPT_KEY:([^|\\]]+)");
 
 	// ── SSE type references ──────────────────────────────────────────────────────
 	private static final ParameterizedTypeReference<ServerSentEvent<String>>      STRING_SSE_TYPE   = new ParameterizedTypeReference<>() {};
@@ -140,25 +143,33 @@ public class ExecutingDynamicOrchestratorService {
 		AgentType type = registry.getAgentTypes().getOrDefault(res.agent(), AgentType.WEBFLUX);
 		if (AgentType.WEBFLUX.equals(type)) {
 			executingWebClient(originalGoal, accumulatedContext, pipe, depth, res, conversationId,
-					DATA_MSG_SSE_TYPE, (buf, tok) -> processingTokenToWebflux(pipe, buf, tok));
+					DATA_MSG_SSE_TYPE, (buf, tok) -> processingTokenToWebflux(pipe, buf, tok),
+					tok -> {
+						DataMessage d = tok.data();
+						return d != null && d.getMessage() != null && d.getMessage().endsWith("-COMPLETED");
+					});
 		} else {
 			executingWebClient(originalGoal, accumulatedContext, pipe, depth, res, conversationId,
-					STRING_SSE_TYPE, (buf, tok) -> processingTokenToMvc(pipe, buf, tok));
+					STRING_SSE_TYPE, (buf, tok) -> processingTokenToMvc(pipe, buf, tok),
+					tok -> false);
 		}
 	}
 
 	private <T> void executingWebClient(String originalGoal, String accumulatedContext,
 			Sinks.Many<ServerSentEvent<DataMessage>> pipe, int depth, DecisionResult res, String conversationId,
 			ParameterizedTypeReference<ServerSentEvent<T>> typeRef,
-			BiConsumer<StringBuilder, ServerSentEvent<T>> tokenProcessor) {
+			BiConsumer<StringBuilder, ServerSentEvent<T>> tokenProcessor,
+			Predicate<ServerSentEvent<T>> completionPredicate) {
 
 		StringBuilder stepBuffer = new StringBuilder();
-		webClient.post()
-				.uri(registry.getAgents().get(res.agent()))
-				.bodyValue(buildSubAgentRequest(res.agent(), accumulatedContext, originalGoal))
-				.accept(MediaType.TEXT_EVENT_STREAM)
-				.retrieve()
-				.bodyToFlux(typeRef)
+		buildSubAgentRequestAsync(res.agent(), accumulatedContext, originalGoal)
+				.flatMapMany(subReq -> webClient.post()
+						.uri(registry.getAgents().get(res.agent()))
+						.bodyValue(subReq)
+						.accept(MediaType.TEXT_EVENT_STREAM)
+						.retrieve()
+						.bodyToFlux(typeRef))
+				.takeWhile(token -> !completionPredicate.test(token))
 				.doOnNext(token -> tokenProcessor.accept(stepBuffer, token))
 				.doOnError(pipe::tryEmitError)
 				.doOnComplete(() -> handleStepCompletion(
@@ -175,9 +186,11 @@ public class ExecutingDynamicOrchestratorService {
 				registry.getAgentNeedingLongStringInput(), LAYOUT_KEY_PREFIX, conversationId, rawOutput);
 		String jsonKey   = resolveRedisKey(res.agent(), registry.getAgentProducingJsonData(),
 				registry.getAgentNeedingJsonDataInput(), JSON_DATA_KEY_PREFIX, conversationId, rawOutput);
+		String promptKey = resolveRedisKey(res.agent(), registry.getAgentProducingPrompt(),
+				registry.getAgentNeedingPromptInput(), PROMPT_KEY_PREFIX, conversationId, rawOutput);
 
 		String nextContext = buildNextContext(accumulatedContext,
-				buildStepSummary(res, rawOutput, depth, imageKey, layoutKey, jsonKey));
+				buildStepSummary(res, rawOutput, depth, imageKey, layoutKey, jsonKey, promptKey));
 
 		redisTemplate.opsForValue().set(CONTEXT_KEY_PREFIX + conversationId, nextContext, CONTEXT_TTL).subscribe();
 		processStep(originalGoal, nextContext, pipe, depth + 1, conversationId);
@@ -218,8 +231,7 @@ public class ExecutingDynamicOrchestratorService {
 			StringBuilder stepBuffer, ServerSentEvent<String> token) {
 		String rawData = token.data();
 		if (Objects.nonNull(rawData) && !rawData.isBlank()
-				&& !rawData.equals("Image generation started for prompt")
-				&& !rawData.endsWith("-COMPLETED")) {
+				&& !rawData.equals("Image generation started for prompt")) {
 			stepBuffer.append(rawData);
 			DataMessage data = new DataMessage();
 			data.setMessage(rawData);
@@ -234,9 +246,8 @@ public class ExecutingDynamicOrchestratorService {
 
 	// ── Request building ─────────────────────────────────────────────────────────
 
-	private SubAgentRequest buildSubAgentRequest(String agent, String accumulatedContext, String prompt) {
+	private Mono<SubAgentRequest> buildSubAgentRequestAsync(String agent, String accumulatedContext, String prompt) {
 		SubAgentRequest request = new SubAgentRequest();
-		request.setPrompt(prompt);
 		if (Boolean.TRUE.equals(registry.getAgentNeedingImageInput().get(agent))) {
 			String key = extractLatestKey(IMAGE_KEY_PATTERN, accumulatedContext);
 			if (key != null) request.setImageReferences(List.of(key));
@@ -249,7 +260,19 @@ public class ExecutingDynamicOrchestratorService {
 			String key = extractLatestKey(JSON_KEY_PATTERN, accumulatedContext);
 			if (key != null) request.setImageReferences(List.of(key));
 		}
-		return request;
+		if (Boolean.TRUE.equals(registry.getAgentNeedingPromptInput().get(agent))) {
+			String key = extractLatestKey(PROMPT_KEY_PATTERN, accumulatedContext);
+			if (key != null) {
+				return redisTemplate.opsForValue().get(key)
+						.defaultIfEmpty(prompt)
+						.map(resolvedPrompt -> {
+							request.setPrompt(resolvedPrompt);
+							return request;
+						});
+			}
+		}
+		request.setPrompt(prompt);
+		return Mono.just(request);
 	}
 
 	// ── Inbound resource management ──────────────────────────────────────────────
@@ -304,16 +327,17 @@ public class ExecutingDynamicOrchestratorService {
 	}
 
 	private String buildStepSummary(DecisionResult res, String rawOutput, int stepNumber,
-			String imageRedisKey, String longStringRedisKey, String jsonDataRedisKey) {
+			String imageRedisKey, String longStringRedisKey, String jsonDataRedisKey, String promptRedisKey) {
 		String truncatedInput = (res.input() != null && res.input().length() > 300)
 				? res.input().substring(0, 300) + "..."
 				: res.input();
 		String outputSummary = summariseOutput(rawOutput);
-		String imagePart    = imageRedisKey     != null ? " | IMAGE_KEY:"  + imageRedisKey     : "";
-		String stringPart   = longStringRedisKey != null ? " | STRING_KEY:" + longStringRedisKey : "";
-		String jsonDataPart = jsonDataRedisKey  != null ? " | JSON_KEY:"   + jsonDataRedisKey  : "";
-		return String.format("[Step %d completed – Agent: '%s'%s%s%s | Input: %s | Result: %s]",
-				stepNumber + 1, res.agent(), imagePart, stringPart, jsonDataPart, truncatedInput, outputSummary);
+		String imagePart    = imageRedisKey     != null ? " | IMAGE_KEY:"   + imageRedisKey     : "";
+		String stringPart   = longStringRedisKey != null ? " | STRING_KEY:"  + longStringRedisKey : "";
+		String jsonDataPart = jsonDataRedisKey  != null ? " | JSON_KEY:"    + jsonDataRedisKey  : "";
+		String promptPart   = promptRedisKey    != null ? " | PROMPT_KEY:"  + promptRedisKey    : "";
+		return String.format("[Step %d completed – Agent: '%s'%s%s%s%s | Input: %s | Result: %s]",
+				stepNumber + 1, res.agent(), imagePart, stringPart, jsonDataPart, promptPart, truncatedInput, outputSummary);
 	}
 
 	private String summariseOutput(String rawOutput) {
