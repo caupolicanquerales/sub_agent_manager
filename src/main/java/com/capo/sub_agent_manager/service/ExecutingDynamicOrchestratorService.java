@@ -230,9 +230,7 @@ public class ExecutingDynamicOrchestratorService {
 	private void processingTokenToMvc(Sinks.Many<ServerSentEvent<DataMessage>> pipe,
 			StringBuilder stepBuffer, ServerSentEvent<String> token) {
 		String rawData = token.data();
-		if (Objects.nonNull(rawData) && !rawData.isBlank()
-				&& !rawData.equals("Image generation started for prompt")) {
-			stepBuffer.append(rawData);
+		if (Objects.nonNull(rawData) && !rawData.isBlank()) {
 			DataMessage data = new DataMessage();
 			data.setMessage(rawData);
 			ServerSentEvent<DataMessage> mapped = ServerSentEvent.<DataMessage>builder()
@@ -241,6 +239,9 @@ public class ExecutingDynamicOrchestratorService {
 					.data(data)
 					.build();
 			pipe.tryEmitNext(mapped);
+			if (!rawData.equals("Image generation started for prompt")) {
+				stepBuffer.append(rawData);
+			}
 		}
 	}
 
